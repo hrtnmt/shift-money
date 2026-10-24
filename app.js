@@ -149,6 +149,23 @@ function revoSim(balance, monthly, rate){
   while (b > 0 && n < 600){ const i = b * r; interest += i; b = b + i - p; n++; }
   return { n, interest: Math.round(interest) };
 }
+// 延期：it.moves = { 元の日付(YYYY-MM-DD): 新しい日付 | 'skip' }
+function moved(it, d){ const m = (it.moves || {})[D.ymd(d)]; if (m === 'skip') return null; return m ? D.parse(m) : d; }
+// 毎月の発生日（延期を反映）。今日〜to の範囲を返す
+function occ(it, day, c, to){
+  const out = [];
+  for (const o of monthlyDates(day, D.addD(c.today, -93), D.addD(to || c.deadline, 0))){
+    const d = moved(it, o); if (!d) continue;
+    if (d >= c.today && d <= (to || c.deadline)) out.push({ orig: o, date: d, moved: +d !== +o });
+  }
+  // 延期で期間外に出た回は除外、期間内に移った過去の回も含める
+  for (const [k, v] of Object.entries(it.moves || {})){
+    if (v === 'skip') continue; const o = D.parse(k), d = D.parse(v);
+    if (o < D.addD(c.today, -93) && d >= c.today && d <= (to || c.deadline)) out.push({ orig: o, date: d, moved: true });
+  }
+  return out.sort((a,b) => a.date - b.date);
+}
+const FAR = c => D.addD(c.today, 400);
 function instSchedule(it){
   const start = it.startMonth ? D.parse(it.startMonth + '-01') : D.today();
   let count, per, last;
@@ -159,13 +176,15 @@ function instSchedule(it){
     count = Math.max(0, Math.round(num(it.count))); const total = num(it.total);
     per = count ? Math.floor(total / count) : 0; last = total - per * (count - 1);
   }
-  const dates = []; for (let k = 0; k < count; k++){ const t = D.addM(start.getFullYear(), start.getMonth(), k); dates.push({ d: D.on(t.y, t.m, num(it.dueDay) || 27), amt: k === count - 1 ? last : per }); }
+  const dates = []; for (let k = 0; k < count; k++){ const t = D.addM(start.getFullYear(), start.getMonth(), k); const o = D.on(t.y, t.m, num(it.dueDay) || 27); dates.push({ o, d: moved(it, o) || o, amt: k === count - 1 ? last : per }); }
+  dates.sort((a,b) => a.d - b.d);
   return { dates, count, per };
 }
 function cardDueMonthFor(it, y, m){ return num(it.dueDay) > num(it.closeDay) ? D.addM(y, m, 0) : D.addM(y, m, 1); }
+const moveNote = f => f.moved ? `${D.md(f.orig)}から延期` : '';
 
 const TYPES = {
-  lump: { label: '要返済（一括）', group: 'expense', tag: '一括',
+  lump: { label: '要返済（一括）', group: 'expense', tag: '一括', postpone: true,
     fields: [
       { k: 'name', l: '名前（誰に・何を）', t: 'text', full: true, ph: '例：友だちに借りたお金' },
       { k: 'amount', l: '金額', t: 'yen' },
@@ -174,18 +193,21 @@ const TYPES = {
       { k: 'memo', l: 'メモ', t: 'text', full: true },
     ],
     analyze(it, c){
-      const due = D.parse(it.dueDate);
+      const o = D.parse(it.dueDate); const due = o ? moved(it, o) || o : null;
       if (it.paid) return { flows: [], meta: '返済済み', head: num(it.amount) };
-      const flows = []; let meta = '期日未設定';
+      const flows = []; let meta = '期日未設定'; let next = null;
       if (due){
         const left = D.diff(c.today, due);
         meta = left < 0 ? `期日を${-left}日過ぎています` : left === 0 ? '今日が期日' : `${D.md(due)}（${D.wd(due)}）まで あと${left}日`;
-        if (due <= c.deadline) flows.push({ date: due < c.today ? c.today : due, amount: num(it.amount), note: left < 0 ? '期限超過' : '' });
-        else meta += '（今回の計算期間外）';
+        if (+due !== +o) meta += `（${D.md(o)}から延期）`;
+        const f = { orig: o, date: due < c.today ? c.today : due, amount: num(it.amount), moved: +due !== +o };
+        f.note = left < 0 ? '期限超過' : moveNote(f);
+        next = f;
+        if (due <= c.deadline) flows.push(f); else meta += '（今回の計算期間外）';
       }
-      return { flows, meta, head: num(it.amount), warn: due && due < c.today };
+      return { flows, meta, head: num(it.amount), warn: due && due < c.today, next };
     }},
-  revo: { label: 'リボ残高', group: 'expense', tag: 'リボ',
+  revo: { label: 'リボ残高', group: 'expense', tag: 'リボ', postpone: true,
     fields: [
       { k: 'name', l: 'カード名', t: 'text', full: true, ph: '例：〇〇カード リボ' },
       { k: 'balance', l: '現在のリボ残高', t: 'yen' },
@@ -195,15 +217,16 @@ const TYPES = {
     ],
     analyze(it, c){
       const sim = revoSim(it.balance, it.monthly, it.rate);
-      const r = num(it.rate) / 100 / 12; let b = num(it.balance); const flows = [];
-      for (const d of monthlyDates(it.dueDay, c.today, c.deadline)){ if (b <= 0) break; const p = Math.min(num(it.monthly), Math.round(b * (1 + r))); flows.push({ date: d, amount: p }); b = b * (1 + r) - p; }
+      const r = num(it.rate) / 100 / 12; let b = num(it.balance); const all = [];
+      for (const o of occ(it, it.dueDay, c, FAR(c))){ if (b <= 0) break; const p = Math.min(num(it.monthly), Math.round(b * (1 + r))); all.push({ ...o, amount: p, note: moveNote(o) }); b = b * (1 + r) - p; }
+      const flows = all.filter(f => f.date <= c.deadline);
       let meta;
       if (sim.n === Infinity) meta = '支払額が利息以下のため、このままでは残高が減りません';
       else if (sim.n === 0) meta = '完済済み';
       else { const t = D.today(); const fin = D.addM(t.getFullYear(), t.getMonth(), sim.n); meta = `あと約${sim.n}回で完済（${fin.y}年${fin.m+1}月ごろ）・利息 約${yen(sim.interest)}`; }
-      return { flows, meta, head: num(it.balance), warn: sim.n === Infinity, sub: `毎月 ${yen(it.monthly)}` };
+      return { flows, meta, head: num(it.balance), warn: sim.n === Infinity, sub: `毎月 ${yen(it.monthly)}`, next: all[0] || null };
     }},
-  card: { label: 'クレジットカード（月払い）', group: 'expense', tag: 'カード',
+  card: { label: 'クレジットカード（月払い）', group: 'expense', tag: 'カード', postpone: true,
     fields: [
       { k: 'name', l: 'カード名', t: 'text', full: true, ph: '例：楽天カード' },
       { k: 'closeDay', l: '請求確定日（毎月）', t: 'day', hint: 'この日に金額の入力をお知らせします' },
@@ -212,14 +235,15 @@ const TYPES = {
     ],
     analyze(it, c){
       it.amounts = it.amounts || {};
-      const flows = monthlyDates(it.dueDay, c.today, c.deadline).map(d => {
-        const k = D.ym(d); const fixed = it.amounts[k] != null;
-        return { date: d, amount: fixed ? num(it.amounts[k]) : num(it.estimate), note: fixed ? '確定' : '見込み' };
+      const all = occ(it, it.dueDay, c, FAR(c)).map(o => {
+        const k = D.ym(o.orig); const fixed = it.amounts[k] != null;
+        return { ...o, amount: fixed ? num(it.amounts[k]) : num(it.estimate), note: [fixed ? '確定' : '見込み', moveNote(o)].filter(Boolean).join('・') };
       });
-      const next = flows[0];
-      return { flows, meta: next ? `次回 ${D.md(next.date)} 引き落とし ${yen(next.amount)}（${next.note}）` : '計算期間内の引き落としなし', head: next ? next.amount : 0, sub: `毎月${it.closeDay}日確定 / ${it.dueDay}日引落` };
+      const flows = all.filter(f => f.date <= c.deadline);
+      const next = all[0];
+      return { flows, meta: next ? `次回 ${D.md(next.date)} 引き落とし ${yen(next.amount)}（${next.note}）` : '引き落とし予定なし', head: next ? next.amount : 0, sub: `毎月${it.closeDay}日確定 / ${it.dueDay}日引落`, next };
     }},
-  inst: { label: '分割払い', group: 'expense', tag: '分割',
+  inst: { label: '分割払い', group: 'expense', tag: '分割', postpone: true,
     fields: [
       { k: 'name', l: '名前', t: 'text', full: true, ph: '例：スマホ本体' },
       { k: 'mode', l: '入力方法', t: 'seg', opts: [['count', '何回払い'], ['monthly', '月額で入力']], full: true },
@@ -234,12 +258,13 @@ const TYPES = {
       const paid = sc.dates.filter(x => x.d < c.today);
       const rest = sc.dates.filter(x => x.d >= c.today);
       const restAmt = rest.reduce((a,x) => a + x.amt, 0);
-      const flows = rest.filter(x => x.d <= c.deadline).map(x => ({ date: x.d, amount: x.amt }));
+      const mk = x => { const f = { orig: x.o, date: x.d, amount: x.amt, moved: +x.o !== +x.d }; f.note = moveNote(f); return f; };
+      const flows = rest.filter(x => x.d <= c.deadline).map(mk);
       const fin = sc.dates.at(-1)?.d;
       const meta = !sc.count || !sc.per ? '総額と回数（または月額）を入力してください' : rest.length ? `あと${rest.length}回・残り${yen(restAmt)}・${fin ? D.ymj(fin) : ''}で完済` : '完済しました';
-      return { flows, meta, head: sc.per, sub: `${sc.count}回払い（${paid.length}回済み）`, progress: sc.count ? paid.length / sc.count : 1 };
+      return { flows, meta, head: sc.per, sub: `${sc.count}回払い（${paid.length}回済み）`, progress: sc.count ? paid.length / sc.count : 1, next: rest[0] ? mk(rest[0]) : null };
     }},
-  save: { label: '積み立て', group: 'expense', tag: '積立',
+  save: { label: '積み立て', group: 'expense', tag: '積立', postpone: true, canSkip: true,
     fields: [
       { k: 'name', l: '目的', t: 'text', full: true, ph: '例：新しいオーディオインターフェース' },
       { k: 'goal', l: '目標金額', t: 'yen' },
@@ -253,7 +278,8 @@ const TYPES = {
       const need = Math.max(0, num(it.goal) - num(it.current));
       if (it.mode === 'date'){
         const tg = D.parse(it.targetDate); if (!tg) return 0;
-        const n = monthlyDates(it.day || 25, D.today(), tg).filter(d => !(it.doneMonths||[]).includes(D.ym(d))).length || 1;
+        const c = { today: D.today() };
+        const n = occ(it, it.day || 25, c, tg).filter(o => !(it.doneMonths||[]).includes(D.ym(o.orig))).length || 1;
         return Math.ceil(need / n);
       }
       return num(it.monthly);
@@ -262,13 +288,16 @@ const TYPES = {
       const need = Math.max(0, num(it.goal) - num(it.current));
       const per = TYPES.save.monthlyOf(it);
       const done = it.doneMonths || [];
-      let left = need; const flows = [];
-      for (const d of monthlyDates(it.day || 25, c.today, c.deadline)){ if (left <= 0) break; if (done.includes(D.ym(d))) continue; const a = Math.min(per, left); flows.push({ date: d, amount: a }); left -= a; }
+      let left = need; const all = [];
+      for (const o of occ(it, it.day || 25, c, FAR(c))){ if (left <= 0) break; if (done.includes(D.ym(o.orig))) continue; const a = Math.min(per, left); all.push({ ...o, amount: a, note: moveNote(o) }); left -= a; }
+      const flows = all.filter(f => f.date <= c.deadline);
+      const skipped = Object.values(it.moves || {}).filter(v => v === 'skip').length;
       let meta;
       if (need <= 0) meta = '目標達成';
       else if (per <= 0) meta = '積立額が未設定です';
-      else { const n = Math.ceil(need / per); const t = D.today(); const f = D.addM(t.getFullYear(), t.getMonth(), n - (done.includes(D.ym(t)) ? 0 : 1)); meta = `あと${yen(need)}・毎月${yen(per)}で ${f.y}年${f.m+1}月に達成`; }
-      return { flows, meta, head: per, sub: `${yen(it.current)} / ${yen(it.goal)}`, progress: num(it.goal) ? Math.min(1, num(it.current) / num(it.goal)) : 0, canDeposit: need > 0 && per > 0 && !done.includes(D.ym(c.today)) };
+      else { const fin = all.at(-1)?.date; meta = `あと${yen(need)}・毎月${yen(per)}で ${fin ? D.ymj(fin) : '—'}に達成`; }
+      if (skipped) meta += `（${skipped}回スキップ）`;
+      return { flows, meta, head: per, sub: `${yen(it.current)} / ${yen(it.goal)}`, progress: num(it.goal) ? Math.min(1, num(it.current) / num(it.goal)) : 0, canDeposit: need > 0 && per > 0 && !done.includes(D.ym(c.today)) && (it.moves || {})[D.ymd(D.on(c.today.getFullYear(), c.today.getMonth(), num(it.day || 25)))] !== 'skip', next: all[0] || null };
     }},
   job: { label: '単発バイト', group: 'income', tag: '単発',
     fields: [
@@ -293,6 +322,33 @@ const TYPES = {
       if (it.mode === 'once'){ return TYPES.job.analyze(it, c); }
       const flows = monthlyDates(it.day, c.today, c.deadline).map(d => ({ date: d, amount: num(it.amount) }));
       return { flows, meta: `毎月${it.day || '?'}日`, head: num(it.amount) };
+    }},
+  wish: { label: '欲しいもの', group: 'expense', tag: '欲しい', postpone: true,
+    fields: [
+      { k: 'name', l: '欲しいもの', t: 'text', full: true, ph: '例：コンデンサーマイク' },
+      { k: 'price', l: '値段', t: 'yen' },
+      { k: 'priority', l: '優先度', t: 'seg', def: '1', opts: [['2', '高'], ['1', '中'], ['0', '低']] },
+      { k: 'useDeadline', l: '購入期限', t: 'seg', opts: [['', 'なし'], ['1', 'いつまでに買う']] },
+      { k: 'deadline', l: 'いつまでに購入', t: 'date', show: v => !!v.useDeadline, hint: '来月締め日までの期限なら、支出として計算に入ります' },
+      { k: 'url', l: 'お店のURL（任意）', t: 'text', full: true, ph: 'https://' },
+      { k: 'memo', l: 'メモ', t: 'text', full: true },
+    ],
+    analyze(it, c, R){
+      const price = num(it.price);
+      if (it.bought) return { flows: [], meta: `${it.boughtOn ? D.md(D.parse(it.boughtOn)) + ' に' : ''}購入済み`, head: price };
+      const o = it.useDeadline ? D.parse(it.deadline) : null;
+      const d = o ? (moved(it, o) || o) : null;
+      const flows = []; let meta, next = null;
+      if (d){
+        const left = D.diff(c.today, d);
+        const f = { orig: o, date: d < c.today ? c.today : d, amount: price, moved: +d !== +o };
+        f.note = left < 0 ? '期限超過' : ['購入予定', moveNote(f)].filter(Boolean).join('・');
+        next = f;
+        if (d <= c.deadline){ flows.push(f); meta = left < 0 ? `期限を${-left}日過ぎています` : `${D.md(d)}（${D.wd(d)}）までに購入・計算に含めています`; }
+        else { const months = Math.max(1, (d.getFullYear() - c.today.getFullYear()) * 12 + d.getMonth() - c.today.getMonth()); meta = `${D.md(d)}までに購入・毎月${yen(Math.ceil(price / months))}取り置けば間に合います`; }
+        if (f.moved) meta += `（${D.md(o)}から延期）`;
+      } else meta = '期限なし';
+      return { flows, meta, head: price, warn: d && d < c.today, next };
     }},
 };
 
@@ -457,6 +513,7 @@ function render(){
   if (current === 'home') renderHome(R);
   if (current === 'income') renderIncome(R);
   if (current === 'expense') renderExpense(R);
+  if (current === 'wish') renderWish(R);
   if (current === 'settings') renderSettings(R);
 }
 
@@ -518,7 +575,7 @@ function renderHome(R){
     <div class="card">
       ${R.flows.length ? `<div class="ledger">
         <div class="li"><span class="d">今</span><div class="n">手元の残高</div><span class="a num">${yen(S.settings.balance)}</span></div>
-        ${R.flows.map(f => `<div class="li"><span class="d">${D.md(f.date)}</span><div class="n"><span class="tag ${f.type}">${esc(f.type === 'pay' ? '給与' : TYPES[f.type].tag)}</span>${esc(f.name)}${f.note ? `<div class="t">${esc(f.note)}</div>` : ''}</div><span class="a num ${f.dir === 'in' ? 'plus' : 'minus'}">${f.dir === 'in' ? '+' : '−'}${yen(f.amount).replace('¥','¥')}</span></div>`).join('')}
+        ${R.flows.map(f => `<div class="li"><span class="d">${D.md(f.date)}</span><div class="n"><span class="tag ${f.type}">${esc(f.type === 'pay' ? '給与' : TYPES[f.type].tag)}</span>${esc(f.name)}${f.note ? `<div class="t">${esc(f.note)}</div>` : ''}</div>${f.dir === 'out' && f.id && TYPES[f.type].postpone ? `<button class="mini" data-postpone="${f.id}" data-orig="${D.ymd(f.orig || f.date)}" aria-label="延期">延期</button>` : ''}<span class="a num ${f.dir === 'in' ? 'plus' : 'minus'}">${f.dir === 'in' ? '+' : '−'}${yen(f.amount).replace('¥','¥')}</span></div>`).join('')}
         <div class="total"><span>差し引き</span><span class="num" style="color:${R.have - R.outSum < 0 ? 'var(--warn)' : 'var(--accent)'}">${yen(R.have - R.outSum)}</span></div>
       </div>` : `<div class="empty">まだ収入・支出がありません。「収入」「支出」タブから追加してください。<br><button class="btn sm" style="margin-top:10px" data-sample>サンプルデータで試す</button></div>`}
     </div>
@@ -536,13 +593,23 @@ function renderHome(R){
 
 function itemCard(it, a){
   const T = TYPES[it.type];
-  return `<button class="item" data-edit="${it.id}">
-    <div class="top"><span class="name">${esc(it.name || T.label)}</span><span class="amt">${yen(a.head)}</span></div>
+  const moves = Object.entries(it.moves || {}).filter(([k]) => D.parse(k) >= D.addD(D.today(), -40) || (it.moves[k] !== 'skip' && D.parse(it.moves[k]) >= D.today()));
+  const acts = [];
+  if (a.canDeposit) acts.push(`<span class="btn sm" role="button" data-deposit="${it.id}">今月分 ${yen(TYPES.save.monthlyOf(it))} を積み立てた</span>`);
+  if (it.type === 'wish' && !it.bought) acts.push(`<span class="btn sm" role="button" data-buy="${it.id}">購入した</span>`);
+  if (it.type === 'wish' && it.bought) acts.push(`<span class="btn sm ghost" role="button" data-unbuy="${it.id}">未購入に戻す</span>`);
+  if (T.postpone && a.next && !(it.type === 'wish' && it.bought)) acts.push(`<span class="btn sm ghost" role="button" data-postpone="${it.id}" data-orig="${D.ymd(a.next.orig)}">${it.type === 'wish' ? '購入期限を延期' : it.type === 'lump' ? '返済期日を延期' : `${D.md(a.next.date)}の分を延期`}</span>`);
+  if (it.url) acts.push(`<span class="btn sm ghost" role="button" data-url="${esc(it.url)}">お店を開く</span>`);
+  const prio = it.type === 'wish' ? `<span class="prio p${it.priority ?? 1}">${['低','中','高'][Number(it.priority ?? 1)]}</span>` : '';
+  return `<button class="item ${it.bought ? 'done' : ''}" data-edit="${it.id}">
+    <div class="top"><span class="name">${prio}${esc(it.name || T.label)}</span><span class="amt">${yen(a.head)}</span></div>
     ${a.sub ? `<div class="meta">${esc(a.sub)}</div>` : ''}
     <div class="meta" ${a.warn ? 'style="color:var(--warn)"' : ''}>${esc(a.meta)}</div>
+    ${a.badge || ''}
     ${a.progress != null ? `<div class="bar ${it.type === 'inst' ? 'warm' : ''}"><i style="width:${Math.round(a.progress*100)}%"></i></div>` : ''}
-    ${a.canDeposit ? `<div style="margin-top:8px"><span class="btn sm" role="button" data-deposit="${it.id}">今月分 ${yen(TYPES.save.monthlyOf(it))} を積み立てた</span></div>` : ''}
     ${it.type === 'card' ? cardHistory(it) : ''}
+    ${moves.length ? `<div class="moves">${moves.map(([k,v]) => `<div class="mv">${v === 'skip' ? `${D.md(D.parse(k))}の分をスキップ中` : `${D.md(D.parse(k))} → ${D.md(D.parse(v))} に延期中`}<span class="link-btn" role="button" data-unmove="${it.id}" data-orig="${k}">元に戻す</span></div>`).join('')}</div>` : ''}
+    ${acts.length ? `<div class="actions">${acts.join('')}</div>` : ''}
   </button>`;
 }
 function cardHistory(it){
@@ -654,11 +721,121 @@ function renderSettings(R){
     </div>`;
 }
 
+function renderWish(R){
+  const c = R.c;
+  const list = S.items.filter(i => i.type === 'wish');
+  const open = list.filter(i => !i.bought).sort((a,b) => Number(b.priority ?? 1) - Number(a.priority ?? 1) || ((a.useDeadline && a.deadline) || '9999').localeCompare((b.useDeadline && b.deadline) || '9999'));
+  const bought = list.filter(i => i.bought);
+  const total = open.reduce((s,i) => s + num(i.price), 0);
+  const counted = R.flows.filter(f => f.type === 'wish').reduce((s,f) => s + f.amount, 0);
+  let room = R.freeWithShift;
+  const cards = open.map(it => {
+    const a = { ...R.analyses[it.id] };
+    const inWin = a.flows.length > 0;
+    if (inWin) a.badge = `<span class="badge in">来月締め日までの支出に入っています</span>`;
+    else if (num(it.price) <= room){ a.badge = `<span class="badge ok">今の余裕で買えます</span>`; room -= num(it.price); }
+    else a.badge = `<span class="badge no">あと ${yen(num(it.price) - room)} 足りません</span>`;
+    return itemCard(it, a);
+  });
+  $('#view-wish').innerHTML = `
+    <div class="kpis">
+      <div class="kpi"><div class="k">欲しいものの合計</div><div class="v num">${yen(total)}</div><div class="faint">${open.length}件（未購入）</div></div>
+      <div class="kpi free"><div class="k">自由に使えるお金</div><div class="v num">${yen(R.freeWithShift)}</div><div class="faint">期限内の ${yen(counted)} は計算済み</div></div>
+    </div>
+    <h2 class="sec"><span>欲しいものリスト</span><button class="btn sm add" data-add="wish">＋ 追加</button></h2>
+    <div class="faint" style="margin:-4px 2px 0">「いつまでに購入」を${D.md(c.deadline)}（来月締め日）までにすると、支出として計算に入ります。優先度の高い順に「買えるか」を判定します。</div>
+    <div class="items">${cards.length ? cards.join('') : '<div class="empty">まだありません</div>'}</div>
+    ${bought.length ? `<details class="card"><summary>購入済み（${bought.length}件）</summary><div class="items" style="margin-top:10px">${bought.map(it => itemCard(it, R.analyses[it.id])).join('')}</div></details>` : ''}`;
+}
+
+// ---------- 確認ダイアログ ----------
+function ask({ title, body, ok = 'OK', danger = false, onInput }){
+  return new Promise(resolve => {
+    const dlg = $('#confirmDlg');
+    $('#confirmTitle').textContent = title;
+    $('#confirmBody').innerHTML = body;
+    const okb = $('#confirmOk'); okb.textContent = ok; okb.className = 'btn primary' + (danger ? ' danger' : '');
+    if (onInput){ $('#confirmBody').oninput = $('#confirmBody').onchange = onInput; $('#confirmBody').onclick = e => { const b = e.target.closest('[data-pseg]'); if (b){ $('#confirmBody').querySelectorAll('[data-pseg]').forEach(x => x.classList.toggle('on', x === b)); onInput(); } }; onInput(); }
+    else { $('#confirmBody').oninput = $('#confirmBody').onchange = $('#confirmBody').onclick = null; }
+    dlg.onclose = () => resolve(dlg.returnValue === 'ok' ? $('#confirmBody') : null);
+    dlg.returnValue = ''; dlg.showModal();
+  });
+}
+const POSTPONE_NOTE = {
+  lump: '返す相手に、延期することを先に連絡しておきましょう。',
+  revo: '引き落とし日を自分で変えることはできません。カード会社に相談済みか、口座への入金を遅らせる場合は延滞（遅延損害金・信用情報への影響）になる点に注意してください。',
+  card: '引き落としを自分で遅らせると延滞になります。カード会社への相談（支払い方法の変更など）が済んでいるときに使ってください。',
+  inst: '分割払いの延期は、お店・カード会社の了承が必要です。延滞にならないよう確認してください。',
+  save: '延期・スキップした分は、目標に間に合うよう後の積立額に上乗せされます（期限から逆算の場合）。',
+  wish: '',
+};
+async function askPostpone(id, origYmd){
+  const it = S.items.find(i => i.id === id); if (!it) return;
+  const T = TYPES[it.type]; const c = context();
+  const a = T.analyze(it, c);
+  const flow = [...a.flows, a.next].filter(Boolean).find(f => D.ymd(f.orig) === origYmd) || a.next;
+  if (!flow) return;
+  const curDate = flow.date;
+  const def = D.on(curDate.getFullYear(), curDate.getMonth() + 1, curDate.getDate());
+  const word = it.type === 'save' ? '積み立て' : it.type === 'wish' ? '購入' : '支払い';
+  const before = compute();
+  const body = `
+    <div><b>${esc(it.name)}</b> の <b>${D.md(curDate)}（${D.wd(curDate)}）</b> の${word} <b class="num">${yen(flow.amount)}</b> を延期します。</div>
+    ${T.canSkip ? `<div class="seg" role="group"><button type="button" class="on" data-pseg="move">別の日に延期</button><button type="button" data-pseg="skip">今回はスキップ</button></div>` : ''}
+    <div class="field" id="pdField"><label for="pdDate">延期先の日付</label><input type="date" id="pdDate" value="${D.ymd(def)}" min="${D.ymd(D.addD(curDate, 1))}"></div>
+    <div class="impact" id="pdImpact"></div>
+    ${POSTPONE_NOTE[it.type] ? `<div class="caution">${POSTPONE_NOTE[it.type]}</div>` : ''}`;
+  const target = () => {
+    const skip = $('#confirmBody').querySelector('[data-pseg="skip"]')?.classList.contains('on');
+    return skip ? 'skip' : $('#pdDate').value;
+  };
+  const withMove = (v, fn) => { const prev = { ...(it.moves || {}) }; it.moves = { ...prev, [origYmd]: v }; try { return fn(); } finally { it.moves = prev; } };
+  const onInput = () => {
+    const v = target(); $('#pdField').hidden = v === 'skip';
+    if (!v){ $('#pdImpact').textContent = '日付を選んでください'; return; }
+    const after = withMove(v, () => compute());
+    const lines = [`来月締め日までに稼ぐ額：<b>${yen(before.need)}</b> → <b>${yen(after.need)}</b>`, `自由に使えるお金：<b>${yen(before.freeWithShift)}</b> → <b>${yen(after.freeWithShift)}</b>`];
+    if (it.type === 'save' && it.mode === 'date'){ const p0 = TYPES.save.monthlyOf(it), p1 = withMove(v, () => TYPES.save.monthlyOf(it)); if (p0 !== p1) lines.push(`毎月の積立額：<b>${yen(p0)}</b> → <b>${yen(p1)}</b>`); }
+    if (it.type === 'revo') lines.push('延期した期間も利息はかかります');
+    $('#pdImpact').innerHTML = lines.join('<br>');
+  };
+  const res = await ask({ title: `${word}の延期`, body, ok: '延期する', onInput });
+  if (!res) return;
+  const v = target(); if (!v) return toast('日付を選んでください');
+  if (v !== 'skip' && D.parse(v) <= curDate) return toast('今の予定日より後の日付を選んでください');
+  it.moves = { ...(it.moves || {}) };
+  if (v === origYmd) delete it.moves[origYmd]; else it.moves[origYmd] = v;
+  commit(); toast(v === 'skip' ? `${D.md(curDate)}の${word}をスキップしました` : `${D.md(D.parse(v))}に延期しました`);
+}
+async function askUnmove(id, k){
+  const it = S.items.find(i => i.id === id); const v = it.moves[k];
+  const ok = await ask({ title: '延期の取り消し', body: `<div><b>${esc(it.name)}</b> の${v === 'skip' ? `${D.md(D.parse(k))}のスキップ` : `延期（${D.md(D.parse(k))} → ${D.md(D.parse(v))}）`}を取り消して、元の日付に戻しますか？</div>`, ok: '元に戻す' });
+  if (!ok) return; delete it.moves[k]; commit(); toast('元の日付に戻しました');
+}
+async function askBuy(id){
+  const it = S.items.find(i => i.id === id);
+  const res = await ask({ title: '購入済みにする', body: `<div><b>${esc(it.name)}</b>（<b class="num">${yen(it.price)}</b>）を購入済みにします。</div>
+    <div class="field"><label for="buyPrice">実際に払った金額</label><input type="number" inputmode="numeric" id="buyPrice" value="${num(it.price)}"></div>
+    <label class="chk"><input type="checkbox" id="buyDeduct" checked> 手元の残高（${yen(S.settings.balance)}）から差し引く</label>`, ok: '購入済みにする' });
+  if (!res) return;
+  const paid = num(res.querySelector('#buyPrice').value);
+  it.bought = true; it.boughtOn = D.ymd(D.today()); it.paidPrice = paid;
+  if (res.querySelector('#buyDeduct').checked){ S.settings.balance = num(S.settings.balance) - paid; it.deducted = paid; }
+  commit(); toast('購入済みにしました');
+}
+async function askUnbuy(id){
+  const it = S.items.find(i => i.id === id);
+  const ok = await ask({ title: '未購入に戻す', body: `<div><b>${esc(it.name)}</b> を未購入に戻しますか？${it.deducted ? `<br>差し引いた ${yen(it.deducted)} は残高に戻します。` : ''}</div>`, ok: '未購入に戻す' });
+  if (!ok) return;
+  if (it.deducted) S.settings.balance = num(S.settings.balance) + num(it.deducted);
+  delete it.bought; delete it.boughtOn; delete it.deducted; delete it.paidPrice; commit();
+}
+
 // ---------- 編集ダイアログ ----------
 let editing = null;
 function openEditor(type, id){
   const T = TYPES[type];
-  const it = id ? S.items.find(i => i.id === id) : { id: uid(), type, mode: T.fields.find(f => f.k === 'mode')?.opts[0][0] };
+  const it = id ? S.items.find(i => i.id === id) : { id: uid(), type, ...Object.fromEntries(T.fields.filter(f => f.t === 'seg').map(f => [f.k, f.def ?? f.opts[0][0]])) };
   editing = { type, id, vals: { ...it } };
   $('#editorTitle').textContent = (id ? '編集：' : '追加：') + T.label;
   $('#editorDelete').hidden = !id;
@@ -670,7 +847,7 @@ function drawFields(){
   $('#editorFields').innerHTML = T.fields.filter(f => !f.show || f.show(v)).map(f => {
     const val = v[f.k] ?? '';
     let input;
-    if (f.t === 'seg') input = `<div class="seg" role="group">${f.opts.map(([o,l]) => `<button type="button" class="${(val||f.opts[0][0])===o?'on':''}" data-seg="${f.k}" data-val="${o}">${l}</button>`).join('')}</div>`;
+    if (f.t === 'seg') input = `<div class="seg" role="group">${f.opts.map(([o,l]) => `<button type="button" class="${String(v[f.k] ?? f.def ?? f.opts[0][0])===o?'on':''}" data-seg="${f.k}" data-val="${o}">${l}</button>`).join('')}</div>`;
     else if (f.t === 'select') input = `<select name="${f.k}">${f.opts.map(([o,l]) => `<option value="${o}" ${String(val)===o?'selected':''}>${l}</option>`).join('')}</select>`;
     else if (f.t === 'day') input = `<select name="${f.k}"><option value="">—</option>${Array.from({length:31},(_,i)=>`<option value="${i+1}" ${String(val)===String(i+1)?'selected':''}>${i+1===31?'末日':(i+1)+'日'}</option>`).join('')}</select>`;
     else { const type = f.t === 'yen' || f.t === 'number' ? 'number' : f.t; input = `<input name="${f.k}" type="${type}" ${type==='number'?'inputmode="decimal"':''} ${f.step?`step="${f.step}"`:''} value="${esc(val)}" placeholder="${esc(f.ph || (f.t==='yen'?'¥':''))}">`; }
@@ -701,6 +878,9 @@ function sample(){
     { id: uid(), type: 'revo', name: 'カードのリボ', balance: 86000, monthly: 10000, rate: 15, dueDay: 27 },
     { id: uid(), type: 'card', name: 'メインカード', closeDay: 15, dueDay: 10, estimate: 22000, amounts: {} },
     { id: uid(), type: 'inst', name: 'オーディオインターフェース', mode: 'count', total: 36000, count: 12, startMonth: ym(-4), dueDay: 27 },
+    { id: uid(), type: 'wish', name: 'コンデンサーマイク', price: 15000, priority: '2', useDeadline: '1', deadline: D.ymd(D.addD(t, 20)) },
+    { id: uid(), type: 'wish', name: 'スコア（プロコフィエフ ソナタ集）', price: 4800, priority: '1' },
+    { id: uid(), type: 'wish', name: 'ワイヤレスイヤホン', price: 24000, priority: '0', useDeadline: '1', deadline: D.ymd(D.on(y, m + 3, 1)) },
     { id: uid(), type: 'save', name: '新しいマイク', goal: 60000, current: 12000, mode: 'date', targetDate: D.ymd(D.on(y, m + 5, 25)), day: 25, doneMonths: [] },
   );
   commit(); toast('サンプルを追加しました。不要なら各項目から削除できます');
@@ -708,13 +888,19 @@ function sample(){
 
 // ---------- イベント ----------
 document.addEventListener('click', e => {
-  const t = e.target.closest('button, [data-deposit], [data-go], label');
+  const t = e.target.closest('[data-deposit], [data-postpone], [data-unmove], [data-buy], [data-unbuy], [data-url], button, [data-go], label');
   if (!t) return;
   if (t.dataset.tab) return go(t.dataset.tab);
   if (t.dataset.go) return go(t.dataset.go);
   if (t.hasAttribute('data-sync') || t.id === 'syncChip') return syncAll(true);
   if (t.hasAttribute('data-sample')) return sample();
   if (t.dataset.deposit){ e.stopPropagation(); const it = S.items.find(i => i.id === t.dataset.deposit); const per = TYPES.save.monthlyOf(it); it.current = num(it.current) + per; it.doneMonths = [...(it.doneMonths||[]), D.ym(D.today())]; commit(); return toast(`${yen(per)} を積み立てました`); }
+  if (t.dataset.postpone){ e.stopPropagation(); e.preventDefault(); return askPostpone(t.dataset.postpone, t.dataset.orig); }
+  if (t.dataset.unmove){ e.stopPropagation(); e.preventDefault(); return askUnmove(t.dataset.unmove, t.dataset.orig); }
+  if (t.dataset.buy){ e.stopPropagation(); e.preventDefault(); return askBuy(t.dataset.buy); }
+  if (t.dataset.unbuy){ e.stopPropagation(); e.preventDefault(); return askUnbuy(t.dataset.unbuy); }
+  if (t.dataset.url){ e.stopPropagation(); e.preventDefault(); if (/^https?:\/\//.test(t.dataset.url)) window.open(t.dataset.url, '_blank', 'noopener'); return; }
+  if (t.closest('#confirmBody')) return;
   if (t.dataset.add) return openEditor(t.dataset.add);
   if (t.dataset.edit){ const it = S.items.find(i => i.id === t.dataset.edit); return openEditor(it.type, it.id); }
   if (t.dataset.cardsave){ const inp = document.querySelector(`[data-cardamt="${t.dataset.cardsave}"][data-key="${t.dataset.key}"]`); if (inp.value === '') return toast('金額を入力してください'); const it = S.items.find(i => i.id === t.dataset.cardsave); it.amounts = { ...(it.amounts||{}), [t.dataset.key]: num(inp.value) }; commit(); return toast('確定額を保存しました'); }
@@ -726,8 +912,8 @@ document.addEventListener('click', e => {
   if (t.id === 'wpAdd'){ S.settings.workplaces.push({ id: uid(), name: '', keyword: '', wage: num(S.settings.defaultWage), night: 25, transport: 0 }); return commit(); }
   if (t.dataset.wpdel){ S.settings.workplaces = S.settings.workplaces.filter(w => w.id !== t.dataset.wpdel); return commit(); }
   if (t.id === 'exportBtn'){ const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([JSON.stringify(S, null, 2)], { type: 'application/json' })); a.download = DRIVE_FILE; a.click(); return; }
-  if (t.id === 'resetBtn'){ if (confirm('すべてのデータを消去しますか？（Google Driveのファイルも空になります）')){ S = blank(); commit(); } return; }
-  if (t.id === 'editorDelete'){ if (confirm('この項目を削除しますか？')){ S.items = S.items.filter(i => i.id !== editing.id); $('#editor').close(); commit(); toast('削除しました'); } return; }
+  if (t.id === 'resetBtn'){ ask({ title: 'すべて消去', body: '<div>すべてのデータを消去しますか？Google Driveのファイルも空になります。先に「JSONで書き出す」で控えを取っておくと安心です。</div>', ok: '消去する', danger: true }).then(ok => { if (ok){ S = blank(); commit(); toast('消去しました'); } }); return; }
+  if (t.id === 'editorDelete'){ const id = editing.id, nm = editing.vals.name; $('#editor').close(); ask({ title: '削除の確認', body: `<div><b>${esc(nm)}</b> を削除しますか？</div>`, ok: '削除する', danger: true }).then(ok => { if (ok){ S.items = S.items.filter(i => i.id !== id); commit(); toast('削除しました'); } }); return; }
 });
 document.addEventListener('change', e => {
   const el = e.target;

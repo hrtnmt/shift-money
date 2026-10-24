@@ -26,6 +26,7 @@
   <section class="view" id="view-home" data-view="home"></section>
   <section class="view" id="view-income" data-view="income" hidden></section>
   <section class="view" id="view-expense" data-view="expense" hidden></section>
+  <section class="view" id="view-wish" data-view="wish" hidden></section>
   <section class="view" id="view-settings" data-view="settings" hidden></section>
 </main>
 
@@ -33,6 +34,7 @@
   <button data-tab="home" class="active"><svg viewBox="0 0 24 24"><path d="M4 11l8-7 8 7v9a1 1 0 0 1-1 1h-5v-6h-4v6H5a1 1 0 0 1-1-1z"/></svg><span>ホーム</span></button>
   <button data-tab="income"><svg viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></svg><span>収入</span></button>
   <button data-tab="expense"><svg viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6"/></svg><span>支出</span></button>
+  <button data-tab="wish"><svg viewBox="0 0 24 24"><path d="M20.8 5.6a5 5 0 0 0-7.1 0L12 7.3l-1.7-1.7a5 5 0 1 0-7.1 7.1L12 21.5l8.8-8.8a5 5 0 0 0 0-7.1z"/></svg><span>欲しいもの</span></button>
   <button data-tab="settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg><span>設定</span></button>
 </nav>
 
@@ -46,6 +48,17 @@
       <span class="spacer"></span>
       <button value="cancel" class="btn ghost" formnovalidate>キャンセル</button>
       <button value="save" class="btn primary" id="editorSave">保存</button>
+    </footer>
+  </form>
+</dialog>
+
+<dialog id="confirmDlg">
+  <form method="dialog" id="confirmForm">
+    <header class="dlg-head"><h2 id="confirmTitle">確認</h2><button value="cancel" class="icon-btn" aria-label="閉じる" formnovalidate>×</button></header>
+    <div id="confirmBody" class="confirm-body"></div>
+    <footer class="dlg-foot"><span class="spacer"></span>
+      <button value="cancel" class="btn ghost" formnovalidate id="confirmCancel">やめる</button>
+      <button value="ok" class="btn primary" id="confirmOk">OK</button>
     </footer>
   </form>
 </dialog>
