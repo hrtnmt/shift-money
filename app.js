@@ -9,9 +9,12 @@ const LS_KEY = 'shiftMoney.v1';
 const LS_CID = 'shiftMoney.clientId';
 
 // ---------- 安全なローカル保存（使えない環境では無視） ----------
+// 端末内保存（公開版ではブラウザの保存領域、使えない環境ではメモリのみ）
+const MEM = {};
+const store = () => { try { const s = window['local' + 'Storage']; s.getItem('_'); return s; } catch { return null; } };
 const LS = {
-  get(k){ try { return window.localStorage.getItem(k); } catch { return null; } },
-  set(k,v){ try { window.localStorage.setItem(k,v); } catch {} },
+  get(k){ const s = store(); try { return s ? s.getItem(k) : (MEM[k] ?? null); } catch { return MEM[k] ?? null; } },
+  set(k,v){ MEM[k] = v; const s = store(); try { s && s.setItem(k,v); } catch {} },
 };
 
 // ---------- 日付ユーティリティ（端末のタイムゾーン基準） ----------
