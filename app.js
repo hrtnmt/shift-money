@@ -515,6 +515,7 @@ function render(){
   if (current === 'expense') renderExpense(R);
   if (current === 'wish') renderWish(R);
   if (current === 'settings') renderSettings(R);
+  bumpNumbers();
 }
 
 function alertsHtml(R){
@@ -935,6 +936,20 @@ $('#editorForm').addEventListener('submit', e => {
     commit(); toast('保存しました');
   }
 });
+
+// ---------- 押し込みの手触り（タッチ端末の :active 有効化・軽い振動） ----------
+const PRESS = '.btn, .item, .mini, .tabbar button, .seg button, .sync-chip, .icon-btn, .link-btn';
+document.addEventListener('touchstart', () => {}, { passive: true });
+document.addEventListener('pointerdown', e => {
+  const el = e.target.closest(PRESS); if (!el) return;
+  el.classList.add('is-pressed');
+  if (e.pointerType === 'touch' && navigator.vibrate && !matchMedia('(prefers-reduced-motion: reduce)').matches){ try { navigator.vibrate(el.matches('.item') ? 6 : 10); } catch {} }
+  const up = () => { el.classList.remove('is-pressed'); window.removeEventListener('pointerup', up); window.removeEventListener('pointercancel', up); };
+  window.addEventListener('pointerup', up); window.addEventListener('pointercancel', up);
+}, { passive: true });
+// 大きな数字が変わったら軽く弾ませる
+let lastBig = '';
+function bumpNumbers(){ const b = document.querySelector('#view-home .hero .big'); if (!b) return; if (lastBig && lastBig !== b.textContent){ b.classList.add('bump'); } lastBig = b.textContent; }
 
 // ---------- 起動と毎日の自動更新 ----------
 function autoSync(){
